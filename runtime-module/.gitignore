@@ -1,0 +1,6 @@
+work/
+__pycache__/
+*.apk
+*.jar
+*.p12
+*.jks
