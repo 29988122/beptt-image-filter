@@ -11,6 +11,8 @@ final class Config {
             "https://pbs.twimg.com/media/GwhSWS9bEAMnb5W.jpg",
             "https://imgur.com/Bybr2Vi.jpg",
             "https://pbs.twimg.com/media/HKnOPRCacAA85R1?format=jpg&name=4096x4096",
-            "https://pbs.twimg.com/media/HTyToVmaUAAWcut?format=jpg&name=large");
+            "https://pbs.twimg.com/media/HTyToVmaUAAWcut?format=jpg&name=large",
+            "https://youtu.be/iDzKYmwR9gM",
+            "https://youtu.be/f2bhTJqNwCk");
     private Config() {}
 }

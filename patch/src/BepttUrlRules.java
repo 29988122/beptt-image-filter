@@ -22,7 +22,7 @@ public final class BepttUrlRules {
                         || uri.getHost() == null || uri.getRawUserInfo() != null
                         || url.indexOf('*') >= 0) throw new IllegalArgumentException();
             } catch (Exception invalid) {
-                throw new IllegalArgumentException("請每行填一個完整 http(s) 圖片網址；不支援萬用字元：\n" + url);
+                throw new IllegalArgumentException("請每行填一個完整 http(s) 網址；不支援萬用字元：\n" + url);
             }
             parsed.add(url);
         }
@@ -42,9 +42,13 @@ public final class BepttUrlRules {
 
     private static boolean containsSource(String raw, String expected) {
         if (raw == null) return false;
-        Matcher matcher = TOKEN.matcher(raw);
+        Matcher matcher = sourceUrls(raw);
         while (matcher.find()) if (expected.equals(matcher.group())) return true;
         return false;
+    }
+
+    static Matcher sourceUrls(String raw) {
+        return TOKEN.matcher(raw);
     }
 
     public String text() {

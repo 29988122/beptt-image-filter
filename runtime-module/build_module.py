@@ -34,7 +34,7 @@ def main():
     classes = work / "classes"
     classes.mkdir()
     env = dict(os.environ, JAVA_HOME=str(args.java_home.resolve()))
-    run(javac, "--release", "11", "-encoding", "UTF-8", "-cp", os.pathsep.join(map(str, [android, api, *libs])),
+    run(javac, "--release", "17", "-encoding", "UTF-8", "-cp", os.pathsep.join(map(str, [android, api, *libs])),
         "-d", classes, *sources, rules)
     class_jar = work / "module.jar"
     with zipfile.ZipFile(class_jar, "w") as jar:

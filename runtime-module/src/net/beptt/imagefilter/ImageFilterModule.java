@@ -2,34 +2,34 @@ package net.beptt.imagefilter;
 
 import android.content.SharedPreferences;
 import android.util.Log;
-import android.os.Build;
 import io.github.libxposed.api.XposedModule;
+import org.jf.dexlib2.iface.reference.FieldReference;
+import org.jf.dexlib2.iface.reference.MethodReference;
 import java.io.File;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class ImageFilterModule extends XposedModule {
     private static final String TARGET = "y_studio.ka5983.ptt2";
     private static final String TAG = "BePTT Image Filter";
-    private final ThreadLocal<Line> active = new ThreadLocal<>();
+    private final ThreadLocal<ArticleParse> active = new ThreadLocal<>();
     private final AtomicBoolean started = new AtomicBoolean();
-    private final AtomicBoolean reportedFilter = new AtomicBoolean();
+    private final AtomicBoolean reportedImage = new AtomicBoolean();
+    private final AtomicBoolean reportedCard = new AtomicBoolean();
     private String lastConfig;
     private BepttUrlRules lastRules;
 
-    private static final class Line {
-        final String text;
-        final List<?> links;
+    private static final class ArticleParse {
         final BepttUrlRules rules;
-        int calls;
+        final PreviewSources images = new PreviewSources();
+        final PreviewSources cards = new PreviewSources();
+        boolean extracting;
+        boolean failed;
 
-        Line(String text, List<?> links, BepttUrlRules rules) {
-            this.text = text;
-            this.links = links;
+        ArticleParse(BepttUrlRules rules) {
             this.rules = rules;
         }
     }
@@ -41,120 +41,129 @@ public final class ImageFilterModule extends XposedModule {
         try {
             install(param);
         } catch (Exception | LinkageError | io.github.libxposed.api.error.HookFailedError failure) {
-            log(Log.WARN, TAG, "No filter installed. APK layout or Xposed environment unavailable.", failure);
+            log(Log.WARN, TAG, "No preview filter installed. APK layout or Xposed environment unavailable.", failure);
         }
     }
 
     private void install(PackageReadyParam param) throws Exception {
         Fingerprint.Site site = Fingerprint.locate(new File(param.getApplicationInfo().sourceDir));
         ClassLoader loader = param.getClassLoader();
-        Class<?> owner = Class.forName(Fingerprint.className(site.parser.getDefiningClass()), false, loader);
-        Class<?> lineType = Class.forName(Fingerprint.className(site.text.getDefiningClass()), false, loader);
-        Class<?> output = Class.forName(Fingerprint.className(site.parser.getParameterTypes().get(1).toString()), false, loader);
-        Class<?> conversion = Class.forName(Fingerprint.className(site.converter.getDefiningClass()), false, loader);
-        Method parser = owner.getDeclaredMethod(site.parser.getName(), lineType, output);
-        Method converter = conversion.getDeclaredMethod(site.converter.getName(), Iterable.class);
-        Field text = lineType.getDeclaredField(site.text.getName());
-        Field links = lineType.getDeclaredField(site.links.getName());
-        text.setAccessible(true);
-        links.setAccessible(true);
+        Method imageExtractor = resolve(site.imageExtractor, loader);
+        Method webExtractor = resolve(site.webExtractor, loader);
+        Method append = resolve(site.append, loader);
+        Field imageUrl = resolve(site.imageUrl, loader);
+        Field webUrl = resolve(site.webUrl, loader);
         SharedPreferences prefs = getRemotePreferences(Config.GROUP);
-
-        HookHandle converterHook = hook(converter).setExceptionMode(ExceptionMode.PASSTHROUGH).intercept(chain -> {
-            Object result = chain.proceed();
-            Line line = active.get();
-            if (line == null || !(result instanceof List<?>)) return result;
-            try {
-                if (!calledDirectlyByParser(site, parser, converter) || ++line.calls != 2) return result;
-                List<?> images = (List<?>) result;
-                ArrayList<Object> kept = new ArrayList<>(images.size());
-                for (Object image : images) {
-                    if (!(image instanceof String) || !line.rules.hides((String) image, line.text, line.links)) {
-                        kept.add(image);
-                    }
-                }
-                if (kept.size() == images.size()) return result;
-                if (reportedFilter.compareAndSet(false, true)) log(Log.INFO, TAG, "Image preview filter active");
-                return kept;
-            } catch (RuntimeException | LinkageError invalidRule) {
-                return result;
-            }
-        });
+        List<HookHandle> hooks = new ArrayList<>();
         boolean installed = false;
         try {
-            // Force the parser's calls to remain observable even if ART compiled it earlier.
-            deoptimize(parser);
-            hook(parser).setExceptionMode(ExceptionMode.PASSTHROUGH).intercept(chain -> {
-                Line saved = active.get();
-                Line current = null;
-                try {
-                    BepttUrlRules rules = rules(prefs);
-                    if (rules != null && !rules.urls.isEmpty()) {
-                        Object record = chain.getArg(0);
-                        Object raw = text.get(record);
-                        Object urls = links.get(record);
-                        current = new Line((String) raw, urls instanceof List<?> ? (List<?>) urls : Collections.emptyList(), rules);
+            hooks.add(observe(imageExtractor, true));
+            hooks.add(observe(webExtractor, false));
+            hooks.add(hook(append).setExceptionMode(ExceptionMode.PASSTHROUGH).intercept(chain -> {
+                ArticleParse parse = active.get();
+                if (parse != null && !parse.failed && hidesRow(parse, chain.getArg(0), imageUrl, webUrl)) return null;
+                return chain.proceed();
+            }));
+            for (MethodReference reference : site.parsers) {
+                Method parser = resolve(reference, loader);
+                deoptimize(parser);
+                hooks.add(hook(parser).setExceptionMode(ExceptionMode.PASSTHROUGH).intercept(chain -> {
+                    ArticleParse parent = active.get();
+                    BepttUrlRules rules = readRules(prefs);
+                    if (rules == null || rules.urls.isEmpty()) active.remove();
+                    else active.set(new ArticleParse(rules));
+                    try {
+                        return chain.proceed();
+                    } finally {
+                        if (parent == null) active.remove(); else active.set(parent);
                     }
-                } catch (ReflectiveOperationException | RuntimeException ignored) {
-                    // Unavailable config or a mismatched record leaves this article unchanged.
-                }
-                if (current == null) active.remove(); else active.set(current);
-                try {
-                    return chain.proceed();
-                } finally {
-                    if (saved == null) active.remove(); else active.set(saved);
-                }
-            });
+                }));
+            }
             installed = true;
         } finally {
-            if (!installed) converterHook.unhook();
+            if (!installed) for (HookHandle handle : hooks) handle.unhook();
         }
-        log(Log.INFO, TAG, "Image parser fingerprint matched; module ready");
+        log(Log.INFO, TAG, "Article preview filter ready (" + site.parsers.size() + " parser entry points)");
     }
 
-    private static boolean calledDirectlyByParser(Fingerprint.Site site, Method parserMethod, Method converterMethod) {
-        if (Build.VERSION.SDK_INT >= 34) return ModernStack.isDirectCaller(parserMethod, converterMethod);
-        return legacyCallerCheck(site);
-    }
-
-    private static final class ModernStack {
-        private static final StackWalker WALKER = StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
-
-        static boolean isDirectCaller(Method parser, Method converter) {
-            ClassLoader appLoader = parser.getDeclaringClass().getClassLoader();
-            return WALKER.walk(frames -> frames
-                    .filter(frame -> frame.getDeclaringClass().getClassLoader() == appLoader)
-                    .filter(frame -> frame.getDeclaringClass() != converter.getDeclaringClass()
-                            || !converter.getName().equals(frame.getMethodName()))
-                    .findFirst()
-                    .map(frame -> frame.getDeclaringClass() == parser.getDeclaringClass()
-                            && parser.getName().equals(frame.getMethodName())
-                            && parser.getReturnType() == frame.getMethodType().returnType()
-                            && java.util.Arrays.equals(parser.getParameterTypes(), frame.getMethodType().parameterArray()))
-                    .orElse(false));
-        }
-    }
-
-    private static boolean legacyCallerCheck(Fingerprint.Site site) {
-        String parser = Fingerprint.className(site.parser.getDefiningClass());
-        String converter = Fingerprint.className(site.converter.getDefiningClass());
-        for (StackTraceElement frame : Thread.currentThread().getStackTrace()) {
-            String name = frame.getClassName();
-            if (converter.equals(name) && site.converter.getName().equals(frame.getMethodName())) continue;
-            if (site.hostClasses.contains(name)) {
-                return parser.equals(name) && site.parser.getName().equals(frame.getMethodName());
+    private HookHandle observe(Method extractor, boolean image) {
+        Invoker<?, Method> original = getInvoker(extractor).setType(Invoker.Type.ORIGIN);
+        return hook(extractor).setExceptionMode(ExceptionMode.PASSTHROUGH).intercept(chain -> {
+            ArticleParse parse = active.get();
+            if (parse == null || parse.extracting || parse.failed) return chain.proceed();
+            parse.extracting = true;
+            try {
+                Object result = chain.proceed();
+                if (result instanceof List<?>) {
+                    try {
+                        Object imageMode = image ? chain.getArg(1) : null;
+                        PreviewSources sources = image ? parse.images : parse.cards;
+                        sources.record(parse.rules, (String) chain.getArg(0), (List<?>) result, source -> (List<?>)
+                                (image ? original.invoke(null, source, imageMode) : original.invoke(null, source)));
+                    } catch (ReflectiveOperationException | RuntimeException | LinkageError failure) {
+                        parse.failed = true;
+                    }
+                }
+                return result;
+            } finally {
+                parse.extracting = false;
             }
+        });
+    }
+
+    private boolean hidesRow(ArticleParse parse, Object row, Field imageUrl, Field webUrl) {
+        try {
+            if (imageUrl.getDeclaringClass().isInstance(row)) {
+                if (!parse.images.hides((String) imageUrl.get(row), false)) return false;
+                if (reportedImage.compareAndSet(false, true)) log(Log.INFO, TAG, "Matched image preview hidden");
+                return true;
+            }
+            if (webUrl.getDeclaringClass().isInstance(row)) {
+                String url = (String) webUrl.get(row);
+                // OSC links can be added directly as a card without passing through the web extractor.
+                if (!parse.cards.hides(url, parse.rules.urls.contains(url))) return false;
+                if (reportedCard.compareAndSet(false, true)) log(Log.INFO, TAG, "Matched link preview hidden");
+                return true;
+            }
+            parse.images.clear();
+            parse.cards.clear();
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            parse.failed = true;
         }
         return false;
     }
 
-    private synchronized BepttUrlRules rules(SharedPreferences prefs) {
-        if (!prefs.getBoolean("enabled", true)) return null;
-        String config = prefs.getString("urls", Config.DEFAULT_URLS);
-        if (!config.equals(lastConfig)) {
-            lastRules = new BepttUrlRules(config);
-            lastConfig = config;
+    private static Method resolve(MethodReference method, ClassLoader loader) throws ReflectiveOperationException {
+        List<? extends CharSequence> descriptors = method.getParameterTypes();
+        Class<?>[] types = new Class<?>[descriptors.size()];
+        for (int i = 0; i < types.length; i++) {
+            String descriptor = descriptors.get(i).toString();
+            if ("I".equals(descriptor)) types[i] = int.class;
+            else if ("Z".equals(descriptor)) types[i] = boolean.class;
+            else types[i] = Class.forName(Fingerprint.className(descriptor), false, loader);
         }
-        return lastRules;
+        return Class.forName(Fingerprint.className(method.getDefiningClass()), false, loader)
+                .getDeclaredMethod(method.getName(), types);
+    }
+
+    private static Field resolve(FieldReference field, ClassLoader loader) throws ReflectiveOperationException {
+        Field reflected = Class.forName(Fingerprint.className(field.getDefiningClass()), false, loader)
+                .getDeclaredField(field.getName());
+        reflected.setAccessible(true);
+        return reflected;
+    }
+
+    private synchronized BepttUrlRules readRules(SharedPreferences prefs) {
+        try {
+            if (!prefs.getBoolean("enabled", true)) return null;
+            String config = prefs.getString("urls", Config.DEFAULT_URLS);
+            if (!config.equals(lastConfig)) {
+                lastRules = new BepttUrlRules(config);
+                lastConfig = config;
+            }
+            return lastRules;
+        } catch (RuntimeException unavailable) {
+            return null;
+        }
     }
 }

@@ -39,7 +39,7 @@ public final class SettingsActivity extends Activity {
         status = new TextView(this);
         layout.addView(status);
         enabled = new CheckBox(this);
-        enabled.setText("隱藏黑名單中的圖片預覽");
+        enabled.setText("隱藏黑名單中的圖片與連結預覽");
         layout.addView(enabled);
         TextView hint = new TextView(this);
         hint.setText("每行一個完整圖片網址。可直接編輯，或從手機、Dropbox 選取 UTF-8 文字檔。儲存後請重新開啟文章。");

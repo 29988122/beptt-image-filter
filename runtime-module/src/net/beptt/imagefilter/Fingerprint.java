@@ -5,109 +5,123 @@ import org.jf.dexlib2.Opcode;
 import org.jf.dexlib2.iface.*;
 import org.jf.dexlib2.iface.instruction.*;
 import org.jf.dexlib2.iface.reference.*;
+import org.jf.dexlib2.util.MethodUtil;
 import java.io.File;
 import java.io.IOException;
 import java.util.*;
 
 final class Fingerprint {
-    static final String LIST = "Ljava/util/List;";
-    static final String STRING = "Ljava/lang/String;";
+    private static final String STRING = "Ljava/lang/String;";
+    private static final String ARRAY_LIST = "Ljava/util/ArrayList;";
 
     static final class Site {
-        final Method parser;
-        final MethodReference converter;
-        final FieldReference text, links;
-        Set<String> hostClasses;
+        final Method imageExtractor, webExtractor;
+        final FieldReference imageUrl, webUrl;
+        final MethodReference append;
+        final List<Method> parsers;
 
-        Site(Method parser, MethodReference converter, FieldReference text, FieldReference links) {
-            this.parser = parser;
-            this.converter = converter;
-            this.text = text;
-            this.links = links;
+        Site(Method imageExtractor, Method webExtractor, FieldReference imageUrl, FieldReference webUrl,
+             MethodReference append, List<Method> parsers) {
+            this.imageExtractor = imageExtractor;
+            this.webExtractor = webExtractor;
+            this.imageUrl = imageUrl;
+            this.webUrl = webUrl;
+            this.append = append;
+            this.parsers = parsers;
         }
     }
 
     static Site locate(File apk) throws IOException {
-        List<Site> matches = new ArrayList<>();
-        Set<String> hostClasses = new HashSet<>();
         var container = DexFileFactory.loadDexContainer(apk, null);
+        List<Method> methods = new ArrayList<>();
         for (String entry : container.getDexEntryNames()) {
-            var dex = container.getEntry(entry).getDexFile();
-            for (ClassDef type : dex.getClasses()) {
-                hostClasses.add(className(type.getType()));
+            for (ClassDef type : container.getEntry(entry).getDexFile().getClasses()) {
                 for (Method method : type.getMethods()) {
-                    Site match = match(method);
-                    if (match != null) matches.add(match);
+                    if (method.getImplementation() != null) methods.add(method);
                 }
             }
         }
-        if (matches.size() != 1) throw new IllegalStateException("Expected one image parser, found " + matches.size());
-        Site result = matches.get(0);
-        result.hostClasses = hostClasses;
+        Method imageRow = unique(methods, m -> has(m, "ImageRow(url="), "image row");
+        Method webRow = unique(methods, m -> has(m, "WebRow(url="), "web row");
+        FieldReference imageUrl = urlField(methods, imageRow);
+        FieldReference webUrl = urlField(methods, webRow);
+        Method image = unique(methods, m -> MethodUtil.isStatic(m) && ARRAY_LIST.equals(m.getReturnType())
+                && params(m, STRING, "Z") && has(m, "OIUD"), "image extractor");
+        Method web = unique(methods, m -> MethodUtil.isStatic(m) && ARRAY_LIST.equals(m.getReturnType())
+                && params(m, STRING) && has(m, image), "web extractor");
+
+        List<Method> parsers = new ArrayList<>();
+        MethodReference append = null;
+        for (Method method : methods) {
+            if (!"V".equals(method.getReturnType()) || !has(method, image) || !has(method, web)) continue;
+            List<Instruction> code = new ArrayList<>();
+            method.getImplementation().getInstructions().forEach(code::add);
+            MethodReference imageAppend = rowAppend(code, imageRow.getDefiningClass());
+            MethodReference webAppend = rowAppend(code, webRow.getDefiningClass());
+            if (imageAppend == null || !imageAppend.equals(webAppend)) continue;
+            if (append != null && !append.equals(imageAppend)) throw new IllegalStateException("Ambiguous preview output");
+            append = imageAppend;
+            parsers.add(method);
+        }
+        if (append == null) throw new IllegalStateException("No article preview parser");
+        return new Site(image, web, imageUrl, webUrl, append, parsers);
+    }
+
+    private static FieldReference urlField(List<Method> methods, Method row) {
+        String owner = row.getDefiningClass();
+        Method constructor = unique(methods, m -> owner.equals(m.getDefiningClass()) && "<init>".equals(m.getName())
+                && params(m, STRING, STRING), "preview constructor");
+        int receiver = constructor.getImplementation().getRegisterCount() - 3;
+        FieldReference result = null;
+        for (Instruction insn : constructor.getImplementation().getInstructions()) {
+            if (insn.getOpcode() != Opcode.IPUT_OBJECT || !(ref(insn) instanceof FieldReference)) continue;
+            TwoRegisterInstruction registers = (TwoRegisterInstruction) insn;
+            FieldReference field = (FieldReference) ref(insn);
+            if (registers.getRegisterA() != receiver + 1 || registers.getRegisterB() != receiver
+                    || !owner.equals(field.getDefiningClass()) || !STRING.equals(field.getType())) continue;
+            if (result != null) throw new IllegalStateException("Ambiguous preview URL field");
+            result = field;
+        }
+        if (result == null) throw new IllegalStateException("No preview URL field");
         return result;
     }
 
-    private static Site match(Method method) {
-        if (!"V".equals(method.getReturnType()) || method.getParameterTypes().size() != 2
-                || method.getImplementation() == null) return null;
-        String line = method.getParameterTypes().get(0).toString();
-        if (!line.startsWith("L") || !method.getParameterTypes().get(1).toString().startsWith("L")) return null;
-        List<Instruction> code = new ArrayList<>();
-        boolean marker = false;
-        for (Instruction instruction : method.getImplementation().getInstructions()) {
-            code.add(instruction);
-            if (ref(instruction) instanceof StringReference
-                    && "※ 文章網址:".equals(((StringReference) ref(instruction)).getString())) marker = true;
-        }
-        if (!marker || code.size() < 8) return null;
-        // Record fields are the first two object reads immediately after the two parameter moves.
-        if (code.get(0).getOpcode() != Opcode.MOVE_OBJECT_FROM16
-                || code.get(1).getOpcode() != Opcode.MOVE_OBJECT_FROM16) return null;
-        int lineRegister = ((TwoRegisterInstruction) code.get(0)).getRegisterA();
-        if (((TwoRegisterInstruction) code.get(0)).getRegisterB() != method.getImplementation().getRegisterCount() - 2) return null;
-        FieldReference text = field(code.get(2), line, STRING, lineRegister);
-        FieldReference links = field(code.get(3), line, LIST, lineRegister);
-        if (text == null || links == null) return null;
-
-        Site result = null;
-        for (int i = 0; i + 7 < code.size(); i++) {
-            Instruction first = code.get(i), second = code.get(i + 2);
-            if (first.getOpcode() != Opcode.INVOKE_STATIC || second.getOpcode() != Opcode.INVOKE_STATIC
-                    || !(ref(first) instanceof MethodReference) || !ref(first).equals(ref(second))) continue;
-            MethodReference converter = (MethodReference) ref(first);
-            if (!LIST.equals(converter.getReturnType()) || !params(converter, "Ljava/lang/Iterable;")) continue;
-            if (code.get(i + 1).getOpcode() != Opcode.MOVE_RESULT_OBJECT
-                    || code.get(i + 3).getOpcode() != Opcode.MOVE_RESULT_OBJECT
-                    || code.get(i + 4).getOpcode() != Opcode.MOVE
-                    || code.get(i + 5).getOpcode() != Opcode.INVOKE_INTERFACE
-                    || code.get(i + 6).getOpcode() != Opcode.MOVE_RESULT
-                    || code.get(i + 7).getOpcode() != Opcode.IF_GE
-                    || !(ref(code.get(i + 5)) instanceof MethodReference)) continue;
-            MethodReference size = (MethodReference) ref(code.get(i + 5));
-            int other = ((OneRegisterInstruction) code.get(i + 1)).getRegisterA();
-            int images = ((OneRegisterInstruction) code.get(i + 3)).getRegisterA();
-            if (!LIST.equals(size.getDefiningClass()) || !"size".equals(size.getName()) || !params(size)
-                    || !"I".equals(size.getReturnType()) || images == other
-                    || ((FiveRegisterInstruction) code.get(i + 5)).getRegisterC() != other) continue;
-            int calls = 0;
-            boolean imageLoop = false;
-            for (int j = 0; j < code.size(); j++) {
-                Reference instructionRef = ref(code.get(j));
-                if (converter.equals(instructionRef)) calls++;
-                if (j > i + 7 && code.get(j).getOpcode() == Opcode.INVOKE_INTERFACE
-                        && instructionRef instanceof MethodReference) {
-                    MethodReference call = (MethodReference) instructionRef;
-                    if (LIST.equals(call.getDefiningClass()) && "get".equals(call.getName())
-                            && params(call, "I") && ((FiveRegisterInstruction) code.get(j)).getRegisterC() == images) {
-                        imageLoop = true;
-                    }
-                }
-            }
-            if (calls != 2 || !imageLoop) continue;
-            if (result != null) throw new IllegalStateException("Ambiguous converter layout");
-            result = new Site(method, converter, text, links);
+    private static MethodReference rowAppend(List<Instruction> code, String row) {
+        MethodReference result = null;
+        for (int i = 0; i + 1 < code.size(); i++) {
+            Instruction constructor = code.get(i), append = code.get(i + 1);
+            if (constructor.getOpcode() != Opcode.INVOKE_DIRECT || append.getOpcode() != Opcode.INVOKE_VIRTUAL
+                    || !(ref(constructor) instanceof MethodReference) || !(ref(append) instanceof MethodReference)) continue;
+            MethodReference init = (MethodReference) ref(constructor);
+            MethodReference call = (MethodReference) ref(append);
+            if (!row.equals(init.getDefiningClass()) || !"<init>".equals(init.getName())
+                    || !params(init, STRING, STRING) || !"V".equals(call.getReturnType())
+                    || call.getParameterTypes().size() != 1
+                    || ((FiveRegisterInstruction) constructor).getRegisterC() != ((FiveRegisterInstruction) append).getRegisterD()) continue;
+            if (result != null && !result.equals(call)) throw new IllegalStateException("Ambiguous row append");
+            result = call;
         }
         return result;
+    }
+
+    private static Method unique(List<Method> methods, java.util.function.Predicate<Method> match, String label) {
+        Method result = null;
+        for (Method method : methods) {
+            if (!match.test(method)) continue;
+            if (result != null) throw new IllegalStateException("Ambiguous " + label);
+            result = method;
+        }
+        if (result == null) throw new IllegalStateException("No " + label);
+        return result;
+    }
+
+    private static boolean has(Method method, Object marker) {
+        for (Instruction insn : method.getImplementation().getInstructions()) {
+            Reference reference = ref(insn);
+            if (marker.equals(reference) || (reference instanceof StringReference
+                    && marker.equals(((StringReference) reference).getString()))) return true;
+        }
+        return false;
     }
 
     private static boolean params(MethodReference method, String... types) {
@@ -115,13 +129,6 @@ final class Fingerprint {
         if (params.size() != types.length) return false;
         for (int i = 0; i < types.length; i++) if (!types[i].contentEquals(params.get(i))) return false;
         return true;
-    }
-
-    private static FieldReference field(Instruction instruction, String owner, String type, int register) {
-        if (instruction.getOpcode() != Opcode.IGET_OBJECT || !(ref(instruction) instanceof FieldReference)) return null;
-        FieldReference field = (FieldReference) ref(instruction);
-        return owner.equals(field.getDefiningClass()) && type.equals(field.getType())
-                && ((TwoRegisterInstruction) instruction).getRegisterB() == register ? field : null;
     }
 
     private static Reference ref(Instruction instruction) {
