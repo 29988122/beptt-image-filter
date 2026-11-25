@@ -1,6 +1,6 @@
 # BePTT 圖片網址黑名單 Xposed 模組
 
-模組套件 `net.beptt.imagefilter` 獨立於 Play 商店的 BePTT。作用範圍固定為 `y_studio.ka5983.ptt2`。從模組的設定畫面管理完整圖片網址，沿用前版的六個預設網址。BePTT 的 APK、選單、簽章和設定檔不需改動。
+模組套件 `net.beptt.imagefilter` 獨立於 Play 商店的 BePTT。作用範圍固定為 `y_studio.ka5983.ptt2`。從模組的設定畫面管理完整圖片網址，預設網址列在儲存庫根目錄的 [default-blocklist.txt](../default-blocklist.txt)。BePTT 的 APK、選單、簽章和設定檔不需改動。
 
 ## 安裝與設定
 

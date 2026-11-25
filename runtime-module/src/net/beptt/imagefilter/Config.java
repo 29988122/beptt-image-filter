@@ -8,6 +8,9 @@ final class Config {
             "https://i.imgur.com/f940BRg.jpeg",
             "https://pbs.twimg.com/media/G7fNb6Pa8AA64C7.jpg",
             "https://iili.io/BM84n6B.jpg",
-            "https://pbs.twimg.com/media/GwhSWS9bEAMnb5W.jpg");
+            "https://pbs.twimg.com/media/GwhSWS9bEAMnb5W.jpg",
+            "https://imgur.com/Bybr2Vi.jpg",
+            "https://pbs.twimg.com/media/HKnOPRCacAA85R1?format=jpg&name=4096x4096",
+            "https://pbs.twimg.com/media/HTyToVmaUAAWcut?format=jpg&name=large");
     private Config() {}
 }
